@@ -385,11 +385,29 @@ def is_valid_citation_part(p):
     )
 
     return bool(has_year and has_author and has_real_author)
+def is_valid_narrative(p):
+    first_word = p.split()[0]
+    blacklist = {"Figure", "Table", "Section", "Appendix", "Eq", "Equation"}
+    return first_word not in blacklist
 
+def find_numeric_citations(text):
+    results = []
+    seen = set()
 
+    # [28], [1], [12, 13] 같은 것 중 우선 단일 번호
+    for m in re.finditer(r"\[(\d+)\]", text):
+        num = m.group(1)
+        key = (num,)
+        if key not in seen:
+            seen.add(key)
+            results.append([f"[{num}]"])
+
+    return results
 def find_citations(text):
     results = []
+    seen = set()
 
+    # 1) parenthetical author-year
     for m in re.finditer(r"\(([^()]*)\)", text):
         content = m.group(1)
 
@@ -407,7 +425,74 @@ def find_citations(text):
                 valid.append(p)
 
         if valid:
-            results.append(valid)
+            key = tuple(valid)
+            if key not in seen:
+                seen.add(key)
+                results.append(valid)
+
+    # 2) narrative author-year
+    narrative_pattern = re.compile(
+        r"\b[A-Z][a-zA-Z\-']+(?:\s+(?:et al\.|&\s+[A-Z][a-zA-Z\-']+|and\s+[A-Z][a-zA-Z\-']+))?\s*\((?:19|20)\d{2}[a-z]?\)"
+    )
+
+    for m in narrative_pattern.finditer(text):
+        p = normalize_text(m.group(0))
+        if is_valid_narrative(p):
+            key = (p,)
+            if key not in seen:
+                seen.add(key)
+                results.append([p])
+
+    # 3) numeric citations
+    for m in re.finditer(r"\[(\d+)\]", text):
+        p = f"[{m.group(1)}]"
+        key = (p,)
+        if key not in seen:
+            seen.add(key)
+            results.append([p])
+
+    return results
+def find_citations(text):
+    results = []
+    seen = set()
+
+    # 1) 기존 parenthetical citation
+    # 예: (Pal et al., 2024; Xu et al., 2024)
+    for m in re.finditer(r"\(([^()]*)\)", text):
+        content = m.group(1)
+
+        if not re.search(r"[A-Za-z]", content):
+            continue
+
+        if not re.search(r"\b(?:19|20)\d{2}[a-z]?\b", content):
+            continue
+
+        parts = [clean_part(p) for p in content.split(";")]
+
+        valid = []
+        for p in parts:
+            if is_valid_citation_part(p):
+                valid.append(p)
+
+        if valid:
+            key = tuple(valid)
+            if key not in seen:
+                seen.add(key)
+                results.append(valid)
+
+    # 2) narrative citation
+    # 예: Bengio et al. (2009), Hunt (1965), Rafailov et al. (2024)
+    narrative_pattern = re.compile(
+        r"\b[A-Z][a-zA-Z\-']+(?:\s+et al\.)?\s*\((?:19|20)\d{2}[a-z]?\)"
+    )
+
+    for m in narrative_pattern.finditer(text):
+        p = normalize_text(m.group(0))
+        if is_valid_narrative(p):
+            key = (p,)
+            if key not in seen:
+                seen.add(key)
+                results.append([p])
 
     return results
 
