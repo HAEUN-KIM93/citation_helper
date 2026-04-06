@@ -3,7 +3,9 @@ import re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-
+from streamlit_drawable_canvas import st_canvas
+from PIL import Image
+import io
 import fitz
 import requests
 import streamlit as st
@@ -608,14 +610,14 @@ def cluster_lines_by_columns(lines, x_threshold=120):
 
     cols.sort(key=lambda c: c["anchor"])
     return cols
+def render_page_to_png(doc, page_index, zoom=2.0):
+    page = doc[page_index]
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    return pix.tobytes("png")
 
 
-def is_numeric_reference_start(line):
-    t = normalize_text(line)
-    if not t or is_header_noise(t):
-        return False
-
-    return bool(re.match(r"^\[\d+\]\s+", t))
+    
 
 def is_author_year_reference_start(line):
     t = normalize_text(line)
@@ -679,9 +681,11 @@ def looks_like_reference_text(text):
     )
 
     return (has_authorish_start or has_numeric_start) and (has_year or has_venue_hint)
-def is_numeric_ref_start(text):
-    t = normalize_text(text)
-    return bool(re.match(r"^\[(\d+)\]\s+", t))
+def is_numeric_reference_start(line):
+    t = normalize_text(line)
+    if not t or is_header_noise(t):
+        return False
+    return bool(re.match(r"^\[\d+\]\s+", t))
 
 
 def extract_numeric_ref_id(text):
@@ -803,7 +807,7 @@ def get_ref_blocks(doc, start_page=None, end_page=None, mode="auto"):
     elif mode == "author_year":
         refs = merge_reference_lines_author_year_across_pages(all_lines)
     else:
-        numeric_count = sum(1 for ln in all_lines if is_numeric_ref_start(ln["text"]))
+        numeric_count = sum(1 for ln in all_lines if is_numeric_reference_start(ln["text"]))
         if numeric_count >= 3:
             refs = merge_reference_lines_numeric_across_pages(all_lines)
         else:
@@ -1115,11 +1119,17 @@ def detect_reference_mode(lines):
 uploaded = st.file_uploader("PDF 업로드", type="pdf")
 
 if uploaded:
+    
+
+    if "page_drawings" not in st.session_state:
+        st.session_state["page_drawings"] = {}
+
     pdf_bytes = uploaded.getvalue()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     blocks = []
     best = None
     cites = collect_citations(doc)
+    
 
     left, right = st.columns([0.7, 0.3])
 
@@ -1131,16 +1141,17 @@ if uploaded:
     with left:
         st.markdown("### 📄 Reference Page 설정")
         ref_mode = st.radio(
-            "Reference parsing mode",
-            options=["auto", "numeric", "author_year"],
-            format_func=lambda x: {
-                "auto": "Auto",
-                "numeric": "Numeric [1], [2], [3]",
-                "author_year": "Author-Year (Bengio, 2009)"
-            }[x],
-            horizontal=True,
-            key="ref_mode_radio"
-        )
+        "Reference parsing mode",
+        options=["auto", "numeric", "author_year"],
+        format_func=lambda x: {
+            "auto": "Auto",
+            "numeric": "Numeric [1], [2], [3]",
+            "author_year": "Author-Year (Bengio, 2009)"
+        }[x],
+        horizontal=True,
+        key="ref_mode_radio"
+    )
+
         col1, col2 = st.columns(2)
 
         with col1:
@@ -1164,7 +1175,109 @@ if uploaded:
             )
 
         st.markdown("---")
-        pdf_viewer(input=pdf_bytes, height=900)
+        st.markdown("### 👀 Reading / Note")
+
+        view_page = st.number_input(
+            "View page",
+            min_value=1,
+            max_value=len(doc),
+            value=1,
+            step=1,
+            key="view_page_input"
+        )
+
+        zoom = st.slider(
+            "Zoom",
+            min_value=1.0,
+            max_value=3.0,
+            value=2.0,
+            step=0.1,
+            key="page_zoom_slider"
+        )
+
+        page_img = render_page_to_png(doc, view_page - 1, zoom=zoom)
+        img = Image.open(io.BytesIO(page_img))
+
+       
+
+        colA, colB = st.columns([0.7, 0.3])
+
+        with colA:
+            drawing_mode = st.radio(
+            "Mode",
+            ["freedraw", "line", "rect", "transform"],
+            horizontal=True,
+            key=f"drawing_mode_{view_page}"
+                                    )
+
+            stroke_color = st.color_picker(
+                "Color",
+                "#ff0000",
+                key=f"color_{view_page}"
+            )
+
+            stroke_width = st.slider(
+                "Width",
+                1, 10, 3,
+                key=f"width_{view_page}"
+            )
+
+        with colB:
+            st.caption("Tip:")
+            st.caption("- freedraw → 필기")
+            st.caption("- line → 밑줄")
+            st.caption("- rect → 박스")
+        initial_drawing = st.session_state["page_drawings"].get(view_page)
+       
+        canvas_result = st_canvas(
+    background_image=img,
+    drawing_mode=drawing_mode,
+    stroke_width=stroke_width,
+    stroke_color=stroke_color,
+    fill_color="rgba(255, 255, 0, 0.2)",
+    height=img.height,
+    width=img.width,
+    initial_drawing=initial_drawing,
+    key=f"canvas_{view_page}",
+)
+        # -----------------------
+# 🎯 선택 삭제 기능 추가
+# -----------------------
+        if canvas_result.json_data is not None:
+            objects = canvas_result.json_data.get("objects", [])
+
+            if objects:
+                selected_idx = st.selectbox(
+                    "Select object to delete",
+                    range(len(objects)),
+                    format_func=lambda i: f"Object {i}",
+                    key=f"select_obj_{view_page}"
+                )
+
+                if st.button("🗑 Delete selected object", key=f"delete_obj_{view_page}"):
+                    objects.pop(selected_idx)
+
+                    st.session_state["page_drawings"][view_page] = {
+                        "objects": objects,
+                        "background": canvas_result.json_data.get("background", None)
+                    }
+
+                    st.success("Deleted!")
+                    st.rerun()
+        draw_col1, draw_col2 = st.columns(2)
+        with draw_col1:
+            if st.button("💾 Save Drawing", key=f"save_draw_{view_page}"):
+                st.session_state["page_drawings"][view_page] = canvas_result.json_data
+                st.success("Saved drawing!")
+
+        with draw_col2:
+            if st.button("🗑 Clear Drawing", key=f"clear_draw_{view_page}"):
+                st.session_state["page_drawings"].pop(view_page, None)
+                st.success("Cleared drawing!")
+        
+        
+
+        
     if ref_end < ref_start:
         st.error("End page는 Start page보다 크거나 같아야 합니다.")
         blocks = []
@@ -1390,3 +1503,4 @@ if uploaded:
         with st.expander("RAW reference lines"):
             for i, b in enumerate(blocks[:50]):
                 st.write(i, b["text"][:200])
+        
