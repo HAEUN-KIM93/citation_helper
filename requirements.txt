@@ -5,3 +5,4 @@ beautifulsoup4
 streamlit-pdf-viewer
 streamlit-drawable-canvas
 Pillow
+lxml
