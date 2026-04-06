@@ -1195,10 +1195,6 @@ if uploaded:
             key="page_zoom_slider"
         )
 
-        page_img = render_page_to_png(doc, view_page - 1, zoom=zoom)
-        img = Image.open(io.BytesIO(page_img))
-
-       
 
         colA, colB = st.columns([0.7, 0.3])
 
@@ -1227,23 +1223,34 @@ if uploaded:
             st.caption("- freedraw → 필기")
             st.caption("- line → 밑줄")
             st.caption("- rect → 박스")
+        
         initial_drawing = st.session_state["page_drawings"].get(view_page)
+        page_img = render_page_to_png(doc, view_page - 1, zoom=zoom)
+        img = Image.open(io.BytesIO(page_img))
+
+        # ✅ 이 줄 추가 (무조건 보이게)
+        st.image(page_img)
+
+        # ✅ 옵션으로 canvas
+        use_canvas = st.checkbox("✏️ Enable annotation", value=False)
+
+        if use_canvas:
+            canvas_result = st_canvas(
+                background_image=img,
+                drawing_mode=drawing_mode,
+                stroke_width=stroke_width,
+                stroke_color=stroke_color,
+                fill_color="rgba(255, 255, 0, 0.2)",
+                height=img.height,
+                width=img.width,
+                initial_drawing=initial_drawing,
+                key=f"canvas_{view_page}",
+            )
        
-        canvas_result = st_canvas(
-    background_image=img,
-    drawing_mode=drawing_mode,
-    stroke_width=stroke_width,
-    stroke_color=stroke_color,
-    fill_color="rgba(255, 255, 0, 0.2)",
-    height=img.height,
-    width=img.width,
-    initial_drawing=initial_drawing,
-    key=f"canvas_{view_page}",
-)
         # -----------------------
 # 🎯 선택 삭제 기능 추가
 # -----------------------
-        if canvas_result.json_data is not None:
+        if canvas_result and canvas_result.json_data is not None:
             objects = canvas_result.json_data.get("objects", [])
 
             if objects:
