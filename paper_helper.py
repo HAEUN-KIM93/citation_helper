@@ -1232,6 +1232,7 @@ if uploaded:
         st.image(page_img)
 
         # ✅ 옵션으로 canvas
+        canvas_result = None
         use_canvas = st.checkbox("✏️ Enable annotation", value=False)
 
         if use_canvas:
