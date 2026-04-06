@@ -1,8 +1,7 @@
-streamlit
+streamlit==1.40.0
 pymupdf
 requests
 beautifulsoup4
 streamlit-pdf-viewer
-streamlit-drawable-canvas
+streamlit-drawable-canvas==0.9.3
 Pillow
-lxml
