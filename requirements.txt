@@ -3,6 +3,5 @@ pymupdf
 requests
 beautifulsoup4
 streamlit-pdf-viewer
-streamlit_drawable_canvas
-PIL
-io
+streamlit-drawable-canvas
+Pillow
