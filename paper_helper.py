@@ -351,19 +351,23 @@ def is_continuation_line(text):
         r"^(Pattern Recognition\b)",
         r"^(Language Processing\b)",
         r"^(Association for Computational Linguistics\b)",
+        r"^(Curran Associates\b)",
+        r"^(Springer\b)",
+        r"^(JMLR\.org\b)",
+        r"^(PMLR\b)",
         r"^(IEEE\b)",
         r"^(ACM\b)",
-        r"^(PMLR\b)",
         r"^(URL\b)",
         r"^(doi:)",
         r"^(https?://)",
         r"^(pp\.)",
+        r"^(pages\b)",
         r"^(volume\b)",
-        r"^(Singapore,|Miami,|Portland,|Abu Dhabi,|Atlanta,|New York,)",
+        r"^(editor[s]?,\b)",
+        r"^(Singapore,|Miami,|Portland,|Abu Dhabi,|Atlanta,|New York,|Paris,|Berlin,|Dublin,|Toronto,|Montreal,)",
     ]
 
     return any(re.match(p, t, re.I) for p in patterns)
-
 # -------------------------------
 # citation extraction
 # -------------------------------
@@ -385,11 +389,34 @@ def is_valid_citation_part(p):
     )
 
     return bool(has_year and has_author and has_real_author)
-def is_valid_narrative(p):
-    first_word = p.split()[0]
-    blacklist = {"Figure", "Table", "Section", "Appendix", "Eq", "Equation"}
-    return first_word not in blacklist
 
+def iter_reference_lines_across_pages(doc, start_page, end_page):
+    """
+    reference section의 line들을
+    page -> column(left to right) -> y(top to bottom)
+    순서로 이어붙여 반환
+    """
+    all_lines = []
+
+    for i in range(start_page, end_page):
+        page = doc[i]
+        page_lines = get_reference_lines(page)
+        columns = cluster_lines_by_columns(page_lines)
+
+        for col_idx, col in enumerate(columns):
+            for ln in col["lines"]:
+                if should_skip_reference_line(ln["text"]):
+                    continue
+
+                all_lines.append({
+                    "page": i + 1,
+                    "col": col_idx,
+                    "x0": ln["x0"],
+                    "y0": ln["y0"],
+                    "text": ln["text"],
+                })
+
+    return all_lines
 def find_numeric_citations(text):
     results = []
     seen = set()
@@ -403,6 +430,13 @@ def find_numeric_citations(text):
             results.append([f"[{num}]"])
 
     return results
+
+def is_valid_narrative(p):
+    first_word = p.split()[0]
+    blacklist = {"Figure", "Table", "Section", "Appendix", "Eq", "Equation"}
+    return first_word not in blacklist
+
+
 def find_citations(text):
     results = []
     seen = set()
@@ -452,50 +486,6 @@ def find_citations(text):
             results.append([p])
 
     return results
-def find_citations(text):
-    results = []
-    seen = set()
-
-    # 1) 기존 parenthetical citation
-    # 예: (Pal et al., 2024; Xu et al., 2024)
-    for m in re.finditer(r"\(([^()]*)\)", text):
-        content = m.group(1)
-
-        if not re.search(r"[A-Za-z]", content):
-            continue
-
-        if not re.search(r"\b(?:19|20)\d{2}[a-z]?\b", content):
-            continue
-
-        parts = [clean_part(p) for p in content.split(";")]
-
-        valid = []
-        for p in parts:
-            if is_valid_citation_part(p):
-                valid.append(p)
-
-        if valid:
-            key = tuple(valid)
-            if key not in seen:
-                seen.add(key)
-                results.append(valid)
-
-    # 2) narrative citation
-    # 예: Bengio et al. (2009), Hunt (1965), Rafailov et al. (2024)
-    narrative_pattern = re.compile(
-        r"\b[A-Z][a-zA-Z\-']+(?:\s+et al\.)?\s*\((?:19|20)\d{2}[a-z]?\)"
-    )
-
-    for m in narrative_pattern.finditer(text):
-        p = normalize_text(m.group(0))
-        if is_valid_narrative(p):
-            key = (p,)
-            if key not in seen:
-                seen.add(key)
-                results.append([p])
-
-    return results
-
 
 def collect_citations(doc):
     out = []
@@ -555,6 +545,8 @@ def get_reference_lines(page):
     data = page.get_text("dict")
     lines = []
 
+    page_h = page.rect.height
+
     for block in data.get("blocks", []):
         if block.get("type") != 0:
             continue
@@ -571,17 +563,27 @@ def get_reference_lines(page):
 
             x0 = min(span["bbox"][0] for span in spans)
             y0 = min(span["bbox"][1] for span in spans)
+            x1 = max(span["bbox"][2] for span in spans)
+            y1 = max(span["bbox"][3] for span in spans)
+
+            # 페이지 상단/하단의 러닝헤더, 페이지번호 제거용
+            if y0 < 35:
+                continue
+            if y1 > page_h - 25:
+                continue
 
             lines.append({
                 "x0": x0,
                 "y0": y0,
+                "x1": x1,
+                "y1": y1,
                 "text": text
             })
 
     return lines
 
 
-def cluster_lines_by_columns(lines, x_threshold=80):
+def cluster_lines_by_columns(lines, x_threshold=120):
     if not lines:
         return []
 
@@ -608,37 +610,43 @@ def cluster_lines_by_columns(lines, x_threshold=80):
     return cols
 
 
-
-def is_reference_like_start(line):
+def is_numeric_reference_start(line):
     t = normalize_text(line)
-
-    if not t:
+    if not t or is_header_noise(t):
         return False
 
-    if is_header_noise(t):
+    return bool(re.match(r"^\[\d+\]\s+", t))
+
+def is_author_year_reference_start(line):
+    t = normalize_text(line)
+    if not t or is_header_noise(t) or is_continuation_line(t):
         return False
 
-    if is_continuation_line(t):
-        return False
-
-    if re.match(r"^\[\d+\]\s+", t):
-        return True
-
-    if re.match(r"^\d+\.\s+", t):
-        return True
-
-    # 저자 시작 패턴
-    if re.match(r"^[A-Z][A-Za-z'`\-]+(?:\s+[A-Z][A-Za-z.\-']+){1,5},", t):
+    # 중요: author-year에서는 "^\d+\.\s+" 절대 쓰지 않기
+    if re.match(r"^[A-Z]\.\s*[A-Z][A-Za-z'`\-]+", t):
         return True
 
     if re.match(r"^[A-Z][A-Za-z'`\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)", t):
         return True
 
-    if re.match(r"^[A-Z][A-Za-z'`\-]+\s+(?:and|&)\s+[A-Z][A-Za-z'`\-]+", t):
+    if re.match(r"^[A-Z][A-Za-z'`\-]+(?:\s+[A-Z][A-Za-z.\-']+){1,5},", t):
+        return True
+
+    if re.match(
+        r"^[A-Z][A-Za-z'`\-]+\s+[A-Z][A-Za-z'`\-]+"
+        r"\s+(?:and|&)\s+"
+        r"[A-Z][A-Za-z'`\-]+\s+[A-Z][A-Za-z'`\-]+(?:\.|,)",
+        t
+    ):
+        return True
+
+    if re.match(
+        r"^[A-Z][A-Za-z'`\-]+\s+[A-Z][A-Za-z'`\-]+(?:\.|,)",
+        t
+    ):
         return True
 
     return False
-
 
 def looks_like_reference_text(text):
     t = normalize_text(text)
@@ -647,99 +655,131 @@ def looks_like_reference_text(text):
         return False
 
     has_year = bool(re.search(r"\b(?:19|20)\d{2}[a-z]?\b", t))
+
+    # 기존 author-like 시작 + 이니셜 시작 둘 다 허용
     has_authorish_start = bool(
-        re.match(r"^(?:\[\d+\]\s*|\d+\.\s*)?[A-Z][A-Za-z'`\-]+", t)
+        re.match(
+            r"^(?:\[\d+\]\s*|\d+\.\s*)?(?:"
+            r"[A-Z][A-Za-z'`\-]+"          # Lucas / Bengio
+            r"|"
+            r"[A-Z]\.\s*[A-Z][A-Za-z'`\-]+" # L. Ouyang / A. Jain
+            r")",
+            t
+        )
     )
+
+    has_numeric_start = bool(re.match(r"^\[\d+\]\s+", t))
+
     has_venue_hint = bool(
         re.search(
-            r"doi|https|arxiv|ieee|acm|pmlr|conference|journal|workshop|transactions|symposium|proceedings",
+            r"doi|https|arxiv|ieee|acm|pmlr|conference|journal|workshop|transactions|symposium|proceedings|neurips|iclr|acl|emnlp",
             t,
             re.I,
         )
     )
 
-    if has_authorish_start and has_year:
-        return True
-
-    if has_authorish_start and has_venue_hint:
-        return True
-
-    return False
+    return (has_authorish_start or has_numeric_start) and (has_year or has_venue_hint)
+def is_numeric_ref_start(text):
+    t = normalize_text(text)
+    return bool(re.match(r"^\[(\d+)\]\s+", t))
 
 
-def merge_reference_lines(lines):
+def extract_numeric_ref_id(text):
+    t = normalize_text(text)
+    m = re.match(r"^\[(\d+)\]\s+", t)
+    return int(m.group(1)) if m else None
+
+
+def merge_reference_lines_numeric_across_pages(lines):
     refs = []
     cur = None
 
     for ln in lines:
         t = normalize_text(ln["text"])
-
         if not t:
             continue
 
-        if re.match(r"^\d+$", t):
+        # 새 reference 시작
+        if is_numeric_reference_start(t):
+            if cur:
+                cur["text"] = cleanup_reference_text(cur["text"])
+                refs.append(cur)
+
+            cur = {
+                "page_start": ln["page"],
+                "page_end": ln["page"],
+                "ref_id": extract_numeric_ref_id(t),
+                "text": t
+            }
             continue
 
-        if re.match(r"^(references|bibliography)$", t, re.I):
+        # continuation
+        if cur:
+            cur["page_end"] = ln["page"]
+
+            if cur["text"].endswith("-"):
+                cur["text"] = cur["text"][:-1] + t
+            else:
+                cur["text"] += " " + t
+
+    if cur:
+        cur["text"] = cleanup_reference_text(cur["text"])
+        refs.append(cur)
+
+    return refs
+def merge_reference_lines_author_year_across_pages(lines):
+    refs = []
+    cur = None
+
+    for ln in lines:
+        t = normalize_text(ln["text"])
+        if not t:
             continue
 
-        if is_header_noise(t):
+        if should_skip_reference_line(t):
             continue
 
-        # 이미 block이 있으면 continuation 우선 처리
         if cur:
             cur_text = normalize_text(cur["text"])
 
-            # 저자 리스트 줄바꿈: 쉼표로 끝나면 무조건 이어붙임
             if cur_text.endswith(","):
                 cur["text"] += " " + t
+                cur["page_end"] = ln["page"]
                 continue
 
-            # 하이픈 줄바꿈
             if cur_text.endswith("-"):
                 cur["text"] = cur["text"][:-1] + t
+                cur["page_end"] = ln["page"]
                 continue
 
-            # venue / URL / doi / location continuation
             if is_continuation_line(t):
                 cur["text"] += " " + t
+                cur["page_end"] = ln["page"]
                 continue
 
-        # 새 reference 시작
-        if is_reference_like_start(t):
+        if is_author_year_reference_start(t):
             if cur:
-                full_text = normalize_text(cur["text"])
-                if looks_like_reference_text(full_text):
-                    refs.append({"text": full_text})
-            cur = {"text": t}
+                cur["text"] = cleanup_reference_text(cur["text"])
+                refs.append(cur)
+            cur = {
+                "page_start": ln["page"],
+                "page_end": ln["page"],
+                "text": t
+            }
             continue
 
-        # continuation 처리
         if cur:
             cur["text"] += " " + t
-        else:
-            if looks_like_reference_text(t):
-                cur = {"text": t}
+            cur["page_end"] = ln["page"]
 
     if cur:
-        full_text = normalize_text(cur["text"])
-        if looks_like_reference_text(full_text):
-            refs.append({"text": full_text})
+        cur["text"] = cleanup_reference_text(cur["text"])
+        refs.append(cur)
 
-    out = []
-    for r in refs:
-        txt = normalize_text(r["text"])
-        txt = re.sub(r"^\[\d+\]\s*", "", txt)
-        txt = re.sub(r"^\d+\.\s*", "", txt)
-        txt = normalize_text(txt)
-
-        if looks_like_reference_text(txt):
-            out.append({"text": txt})
-
-    return out
+    return refs
 
 
-def get_ref_blocks(doc, start_page=None, end_page=None):
+def get_ref_blocks(doc, start_page=None, end_page=None, mode="auto"):
     if start_page is None:
         start_page = find_reference_start_page(doc)
     else:
@@ -753,26 +793,37 @@ def get_ref_blocks(doc, start_page=None, end_page=None):
     else:
         end_page = min(end_page, len(doc))
 
-    pages = []
+    all_lines = iter_reference_lines_across_pages(doc, start_page, end_page)
 
-    for i in range(start_page, end_page):
-        page = doc[i]
-        lines = get_reference_lines(page)
-        columns = cluster_lines_by_columns(lines)
+    if not all_lines:
+        return []
 
-        page_refs = []
-        for col in columns:
-            refs = merge_reference_lines(col["lines"])
-            page_refs.extend(refs)
+    if mode == "numeric":
+        refs = merge_reference_lines_numeric_across_pages(all_lines)
+    elif mode == "author_year":
+        refs = merge_reference_lines_author_year_across_pages(all_lines)
+    else:
+        numeric_count = sum(1 for ln in all_lines if is_numeric_ref_start(ln["text"]))
+        if numeric_count >= 3:
+            refs = merge_reference_lines_numeric_across_pages(all_lines)
+        else:
+            refs = merge_reference_lines_author_year_across_pages(all_lines)
 
-        for r in page_refs:
-            pages.append({
-                "page": i + 1,
-                "text": r["text"]
-            })
+    out = []
+    for r in refs:
+        txt = normalize_text(r["text"])
+        if not txt:
+            continue
 
-    return pages
+        out.append({
+            "page": r["page_start"],
+            "page_start": r["page_start"],
+            "page_end": r["page_end"],
+            "ref_id": r.get("ref_id"),
+            "text": txt
+        })
 
+    return out
 
 # -------------------------------
 # citation -> reference matching
@@ -789,8 +840,36 @@ def parse_citation_authors_year(part):
 
     return authors, year
 
+def cleanup_reference_text(ref):
+    ref = normalize_text(ref)
 
+    # URL 붙이기
+    ref = re.sub(r"https:\s+//", "https://", ref)
+    ref = re.sub(r"http:\s+//", "http://", ref)
+
+    # paper_files/paper/ /file/... 같은 것 붙이기
+    ref = re.sub(r"/\s+/file/", "/file/", ref)
+
+    # doi spacing
+    ref = re.sub(r"doi:\s+", "doi: ", ref)
+
+    ref = re.sub(r"\s+", " ", ref).strip()
+    return ref
 def find_best_block(part, blocks):
+    part = normalize_text(part)
+
+    # numeric citation: [13]
+    m_num = re.fullmatch(r"\[(\d+)\]", part)
+    if m_num:
+        num = m_num.group(1)
+
+        for b in blocks:
+            text = normalize_text(b["text"])
+            if re.match(rf"^\[{re.escape(num)}\]\s*", text):
+                return b
+        return None
+
+    # author-year citation
     authors, year = parse_citation_authors_year(part)
     norm_year = normalize_year(year)
 
@@ -824,7 +903,6 @@ def find_best_block(part, blocks):
             best = b
 
     return best
-
 
 # -------------------------------
 # sub-reference extraction inside matched block
@@ -996,7 +1074,22 @@ def clean_extracted_title(title):
 
     return title
 
+def is_page_number_line(text):
+    t = normalize_text(text)
+    return bool(re.fullmatch(r"\d+", t))
 
+
+def should_skip_reference_line(text):
+    t = normalize_text(text)
+    if not t:
+        return True
+    if is_header_noise(t):
+        return True
+    if re.match(r"^(references|bibliography)$", t, re.I):
+        return True
+    if is_page_number_line(t):
+        return True
+    return False
 def extract_title(block_text):
     _, raw_title = extract_authors_and_title_from_block(block_text)
     return clean_extracted_title(raw_title)
@@ -1009,7 +1102,13 @@ def make_search_query(part):
     part = re.sub(r"\s+", " ", part).strip()
     return part
 
+def detect_reference_mode(lines):
+    numeric_count = sum(1 for ln in lines if is_numeric_reference_start(ln["text"]))
+    author_like_count = sum(1 for ln in lines if is_author_year_reference_start(ln["text"]))
 
+    if numeric_count >= 3 and numeric_count >= author_like_count * 0.3:
+        return "numeric"
+    return "author_year"
 # -------------------------------
 # UI
 # -------------------------------
@@ -1018,18 +1117,30 @@ uploaded = st.file_uploader("PDF 업로드", type="pdf")
 if uploaded:
     pdf_bytes = uploaded.getvalue()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
+    blocks = []
+    best = None
     cites = collect_citations(doc)
 
     left, right = st.columns([0.7, 0.3])
 
     auto_start = find_reference_start_page(doc)
-    default_start = (auto_start + 1) if auto_start is not None else 13
-    default_end = min(default_start + 5, len(doc))
+    default_start = (auto_start + 1) if auto_start is not None else min(13, len(doc))
+    default_start = max(1, min(default_start, len(doc)))
+    default_end = max(default_start, min(default_start + 5, len(doc)))
 
     with left:
         st.markdown("### 📄 Reference Page 설정")
-
+        ref_mode = st.radio(
+            "Reference parsing mode",
+            options=["auto", "numeric", "author_year"],
+            format_func=lambda x: {
+                "auto": "Auto",
+                "numeric": "Numeric [1], [2], [3]",
+                "author_year": "Author-Year (Bengio, 2009)"
+            }[x],
+            horizontal=True,
+            key="ref_mode_radio"
+        )
         col1, col2 = st.columns(2)
 
         with col1:
@@ -1054,14 +1165,26 @@ if uploaded:
 
         st.markdown("---")
         pdf_viewer(input=pdf_bytes, height=900)
-
     if ref_end < ref_start:
         st.error("End page는 Start page보다 크거나 같아야 합니다.")
         blocks = []
-    else:
-        blocks = get_ref_blocks(doc, start_page=ref_start, end_page=ref_end)
+    else:   
+        all_lines_preview = iter_reference_lines_across_pages(doc, ref_start - 1, ref_end)
+
+        if ref_mode == "auto":
+            detected_mode = detect_reference_mode(all_lines_preview)
+            st.caption(f"Auto detected mode: {detected_mode}")
+
+        blocks = get_ref_blocks(
+            doc,
+            start_page=ref_start,
+            end_page=ref_end,
+            mode=ref_mode
+        )
+       
 
     with right:
+        best = None
         st.subheader("Citation 선택")
         if not cites:
             st.warning("citation을 찾지 못했습니다.")
@@ -1115,7 +1238,13 @@ if uploaded:
 
                 st.markdown("### matched block")
                 with st.container(border=True):
-                    st.caption(f"Reference page: {best['page']}")
+                    if best.get("page_start") and best.get("page_end"):
+                        if best["page_start"] == best["page_end"]:
+                            st.caption(f"Reference page: {best['page_start']}")
+                        else:
+                            st.caption(f"Reference pages: {best['page_start']}–{best['page_end']}")
+                    else:
+                        st.caption(f"Reference page: {best['page']}")
                     st.write(matched_text)
 
                 authors, _ = extract_authors_and_title_from_block(matched_text)
@@ -1182,10 +1311,19 @@ if uploaded:
             st.markdown("### 전체 Reference Block 보기")
 
             ref_options = [
-                f"p.{b['page']} | {b['text'][:120]}..."
-                if len(b["text"]) > 120 else f"p.{b['page']} | {b['text']}"
-                for b in blocks
-            ]
+    (
+        f"pp.{b['page_start']}-{b['page_end']} | {b['text'][:120]}..."
+        if b.get("page_start") != b.get("page_end")
+        else f"p.{b['page_start']} | {b['text'][:120]}..."
+    )
+    if len(b["text"]) > 120 else
+    (
+        f"pp.{b['page_start']}-{b['page_end']} | {b['text']}"
+        if b.get("page_start") != b.get("page_end")
+        else f"p.{b['page_start']} | {b['text']}"
+    )
+    for b in blocks
+]
 
             if ref_options:
                 ref_idx = st.selectbox(
@@ -1196,8 +1334,12 @@ if uploaded:
                 )
 
                 with st.container(border=True):
-                    st.caption(f"Reference page: {blocks[ref_idx]['page']}")
-                    st.write(blocks[ref_idx]["text"])
+                    b = blocks[ref_idx]
+                    if b.get("page_start") == b.get("page_end"):
+                        st.caption(f"Reference page: {b['page_start']}")
+                    else:
+                        st.caption(f"Reference pages: {b['page_start']}–{b['page_end']}")
+                    st.write(b["text"])
             else:
                 st.info("reference block이 없습니다.")
 
